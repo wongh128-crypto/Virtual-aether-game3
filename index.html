@@ -176,14 +176,15 @@
         selectedPetId: null,
         inventory: {},
         petData: { 1: { foodSize: 1.0, appetite: 0, accessory: null, accessorySize: 0, mutation: null } },
-        history: [], // For the Personal Best Leaderboard
+        history: [], 
+        usedGiftCodes: [], // Tracks claimed gifts
         lastHiddenTime: null
     };
 
     [...SHOP_ITEMS.food, ...SHOP_ITEMS.accessories, ...SHOP_ITEMS.special].forEach(item => state.inventory[item.id] = 0);
 
-    // --- LOCAL STORAGE SYSTEM (PLAN B) ---
-    const SAVE_KEY = "virtual_aether_save_v1";
+    // --- LOCAL STORAGE SYSTEM ---
+    const SAVE_KEY = "virtual_aether_save_v2"; // Bumped version for new features
 
     function savePrivateData() {
         try {
@@ -196,7 +197,8 @@
                 totalOfflineSeconds: state.totalOfflineSeconds,
                 inventory: state.inventory,
                 petData: state.petData,
-                history: state.history
+                history: state.history,
+                usedGiftCodes: state.usedGiftCodes
             };
             localStorage.setItem(SAVE_KEY, JSON.stringify(dataToSave));
         } catch (e) {
@@ -206,7 +208,12 @@
 
     function loadPrivateData() {
         try {
-            const savedData = localStorage.getItem(SAVE_KEY);
+            // Also try to migrate from v1 if v2 doesn't exist
+            let savedData = localStorage.getItem(SAVE_KEY);
+            if (!savedData) {
+                savedData = localStorage.getItem("virtual_aether_save_v1");
+            }
+            
             if (savedData) {
                 const data = JSON.parse(savedData);
                 if (data.isRegistered) {
@@ -219,8 +226,8 @@
                     state.inventory = data.inventory || state.inventory;
                     state.petData = data.petData || state.petData;
                     state.history = data.history || [];
+                    state.usedGiftCodes = data.usedGiftCodes || [];
 
-                    // Skip the login screen!
                     document.getElementById('screen-login').classList.add('hidden');
                     document.getElementById('screen-main').classList.remove('hidden');
                     document.getElementById('screen-main').classList.add('flex');
@@ -232,7 +239,6 @@
         }
     }
 
-    // Run this the moment the page loads
     window.addEventListener('DOMContentLoaded', () => {
         loadPrivateData();
     });
@@ -343,13 +349,12 @@
                 if (timeAway > 0) {
                     state.totalOfflineSeconds += timeAway;
                     
-                    // Record session for Personal Best leaderboard
                     state.history.push({
                         date: new Date().toLocaleDateString() + ' ' + new Date().toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'}),
                         time: timeAway
                     });
                     state.history.sort((a, b) => b.time - a.time);
-                    state.history = state.history.slice(0, 15); // Keep top 15
+                    state.history = state.history.slice(0, 15);
 
                     const rewardIntervals = Math.floor(timeAway / 15);
                     const dropRolls = Math.floor(timeAway / 60);
@@ -610,6 +615,108 @@
         }
     };
 
+    // --- GIFTING SYSTEM ---
+    window.createGift = () => {
+        const select = document.getElementById('gift-select').value;
+        const amount = parseInt(document.getElementById('gift-amount').value);
+
+        if (isNaN(amount) || amount <= 0) {
+            window.showNotification("Error", "Please enter a valid amount.");
+            return;
+        }
+
+        if (select === 'coins') {
+            if (state.userCoins < amount) {
+                window.showNotification("Not enough!", "You don't have that many Aether Coins.");
+                return;
+            }
+            state.userCoins -= amount;
+        } else {
+            if (state.inventory[select] < amount) {
+                window.showNotification("Not enough!", "You don't have enough of that item.");
+                return;
+            }
+            state.inventory[select] -= amount;
+        }
+
+        const payload = { 
+            t: select, 
+            q: amount, 
+            r: Math.random().toString(36).substring(2, 10) // Anti-collision randomizer
+        };
+        
+        const code = 'AETHER-' + btoa(JSON.stringify(payload));
+        
+        savePrivateData();
+        updateUI();
+
+        document.getElementById('generated-code-box').classList.remove('hidden');
+        document.getElementById('generated-code-text').innerText = code;
+    };
+
+    window.copyGiftCode = () => {
+        const code = document.getElementById('generated-code-text').innerText;
+        navigator.clipboard.writeText(code).then(() => {
+            document.getElementById('copy-btn').innerText = "Copied!";
+            setTimeout(() => document.getElementById('copy-btn').innerHTML = '<i class="fa-solid fa-copy"></i> Copy', 2000);
+        }).catch(err => {
+            // Fallback for iframe/mobile issues
+            const textArea = document.createElement("textarea");
+            textArea.value = code;
+            document.body.appendChild(textArea);
+            textArea.select();
+            document.execCommand("Copy");
+            textArea.remove();
+            document.getElementById('copy-btn').innerText = "Copied!";
+            setTimeout(() => document.getElementById('copy-btn').innerHTML = '<i class="fa-solid fa-copy"></i> Copy', 2000);
+        });
+    };
+
+    window.claimGift = () => {
+        const code = document.getElementById('claim-input').value.trim();
+        if (!code) return;
+
+        if (!code.startsWith('AETHER-')) {
+            window.showNotification("Invalid Code", "That doesn't look like an Aether Gift Code.");
+            return;
+        }
+
+        if (state.usedGiftCodes.includes(code)) {
+            window.showNotification("Already Claimed!", "This gift code has already been used on your device.");
+            return;
+        }
+
+        try {
+            const encodedStr = code.substring(7); // Remove 'AETHER-'
+            const payload = JSON.parse(atob(encodedStr));
+
+            let giftMsg = "";
+            if (payload.t === 'coins') {
+                state.userCoins += payload.q;
+                giftMsg = `${payload.q} Aether Coins 🪙!`;
+            } else {
+                const item = [...SHOP_ITEMS.food, ...SHOP_ITEMS.accessories, ...SHOP_ITEMS.special].find(i => i.id === payload.t);
+                if (item) {
+                    state.inventory[payload.t] += payload.q;
+                    giftMsg = `${payload.q}x ${item.name} ${item.emoji}!`;
+                } else {
+                    throw new Error("Item not found");
+                }
+            }
+
+            state.usedGiftCodes.push(code);
+            savePrivateData();
+            updateUI();
+
+            document.getElementById('claim-input').value = "";
+            window.showNotification("Gift Claimed! 🎁", `You opened the gift and received:\n\n${giftMsg}`);
+
+        } catch (e) {
+            window.showNotification("Error", "This gift code is invalid or corrupted.");
+        }
+    };
+
+
     // --- ADMIN ACTIONS ---
     window.adminDigestAll = () => {
         Object.keys(state.petData).forEach(k => state.petData[k].appetite = 0);
@@ -667,14 +774,15 @@
             { id: 'home', icon: 'fa-house', label: 'Home' },
             { id: 'collection', icon: 'fa-paw', label: 'Pets' },
             { id: 'shop', icon: 'fa-shop', label: 'Shop' },
-            { id: 'leaderboard', icon: 'fa-medal', label: 'Rank' } // Changed icon
+            { id: 'gift', icon: 'fa-gift', label: 'Gift' },
+            { id: 'leaderboard', icon: 'fa-medal', label: 'Rank' }
         ];
         if (state.isAdminVerified) tabs.push({ id: 'admin', icon: 'fa-gear', label: 'Admin' });
 
         const html = tabs.map(tab => `
-            <button onclick="setTab('${tab.id}')" class="flex flex-col items-center p-2 w-16 rounded-lg transition-colors ${state.currentTab === tab.id ? (tab.id === 'admin' ? 'text-red-400 bg-red-500/10' : tab.id === 'shop' ? 'text-green-400 bg-green-500/10' : 'text-indigo-400 bg-indigo-500/10') : 'text-slate-400 hover:text-slate-200'}">
-                <i class="fa-solid ${tab.icon} text-xl mb-1"></i>
-                <span class="text-[10px] font-medium">${tab.label}</span>
+            <button onclick="setTab('${tab.id}')" class="flex flex-col items-center p-2 w-14 rounded-lg transition-colors ${state.currentTab === tab.id ? (tab.id === 'admin' ? 'text-red-400 bg-red-500/10' : tab.id === 'shop' ? 'text-green-400 bg-green-500/10' : tab.id === 'gift' ? 'text-pink-400 bg-pink-500/10' : 'text-indigo-400 bg-indigo-500/10') : 'text-slate-400 hover:text-slate-200'}">
+                <i class="fa-solid ${tab.icon} text-lg mb-1"></i>
+                <span class="text-[9px] font-medium">${tab.label}</span>
             </button>
         `).join('');
         document.getElementById('nav-buttons').innerHTML = html;
@@ -918,6 +1026,57 @@
             });
             colHtml += `</div>`;
             main.innerHTML = `<div class="fade-in">${colHtml}</div>`;
+        }
+        else if (state.currentTab === 'gift') {
+            // Build dropdown for inventory
+            let optionsHtml = `<option value="coins">🪙 Aether Coins</option>`;
+            [...SHOP_ITEMS.food, ...SHOP_ITEMS.accessories, ...SHOP_ITEMS.special].forEach(item => {
+                if (state.inventory[item.id] > 0 && !item.isAdmin) {
+                    optionsHtml += `<option value="${item.id}">${item.emoji} ${item.name} (Own: ${state.inventory[item.id]})</option>`;
+                }
+            });
+
+            main.innerHTML = `
+                <div class="space-y-6 fade-in pb-10">
+                    <div>
+                        <h2 class="text-2xl font-bold flex items-center gap-2 text-pink-400"><i class="fa-solid fa-gift"></i> Global Gifting</h2>
+                        <p class="text-slate-400 text-sm mt-1">Package items into text codes to text/Discord to your friends!</p>
+                    </div>
+
+                    <!-- Claim Gift -->
+                    <div class="bg-slate-800 p-6 rounded-2xl border-2 border-slate-700 shadow-lg relative overflow-hidden">
+                        <div class="absolute top-0 right-0 w-24 h-24 bg-pink-500/10 rounded-bl-full -z-10"></div>
+                        <h3 class="text-xl font-bold mb-4">Open a Gift</h3>
+                        <div class="flex gap-2">
+                            <input type="text" id="claim-input" placeholder="Paste AETHER- code here..." class="flex-1 bg-slate-900 border border-slate-600 rounded-xl px-4 py-2 text-white font-mono text-sm focus:outline-none focus:border-pink-500">
+                            <button onclick="claimGift()" class="bg-pink-600 hover:bg-pink-500 text-white font-bold px-4 py-2 rounded-xl transition-colors">Claim</button>
+                        </div>
+                    </div>
+
+                    <!-- Create Gift -->
+                    <div class="bg-slate-800 p-6 rounded-2xl border-2 border-slate-700 shadow-lg">
+                        <h3 class="text-xl font-bold mb-4">Wrap a Gift</h3>
+                        
+                        <label class="block text-slate-400 text-sm font-bold mb-2">Select Item to Gift</label>
+                        <select id="gift-select" class="w-full bg-slate-900 border border-slate-600 rounded-xl px-4 py-3 text-white focus:outline-none focus:border-pink-500 mb-4">
+                            ${optionsHtml}
+                        </select>
+
+                        <label class="block text-slate-400 text-sm font-bold mb-2">Amount</label>
+                        <input type="number" id="gift-amount" value="1" min="1" class="w-full bg-slate-900 border border-slate-600 rounded-xl px-4 py-3 text-white font-bold focus:outline-none focus:border-pink-500 mb-6">
+
+                        <button onclick="createGift()" class="w-full bg-indigo-600 hover:bg-indigo-500 text-white font-bold py-3 rounded-xl shadow-lg transition-colors active:scale-95">
+                            Generate Gift Code
+                        </button>
+
+                        <div id="generated-code-box" class="mt-6 hidden bg-slate-900 border border-pink-500/50 rounded-xl p-4 text-center animate-pulse">
+                            <p class="text-xs text-pink-300 font-bold mb-2">YOUR GIFT CODE IS READY:</p>
+                            <p id="generated-code-text" class="font-mono text-sm text-white break-all bg-black/50 p-2 rounded mb-3 select-all"></p>
+                            <button id="copy-btn" onclick="copyGiftCode()" class="bg-slate-700 hover:bg-slate-600 px-4 py-2 rounded-lg text-sm font-bold"><i class="fa-solid fa-copy"></i> Copy</button>
+                        </div>
+                    </div>
+                </div>
+            `;
         }
         else if (state.currentTab === 'leaderboard') {
             let html = `<div><h2 class="text-2xl font-bold flex items-center gap-2 mb-2"><i class="fa-solid fa-medal text-yellow-400"></i> Personal Best</h2><p class="text-slate-400 text-sm mb-6">Your longest times spent away from the screen!</p></div>`;
